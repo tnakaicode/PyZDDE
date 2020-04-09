@@ -7383,6 +7383,241 @@ class PyZDDE(object):
         else:
             return popInfo
 
+    def zGetPOP_XY(self, settingsFile=None, displayData=False, txtFile=None,
+                keepFile=False, timeout=None):
+        """Returns Physical Optics Propagation (POP) data
+
+        Parameters
+        ----------
+        settingsFile : string, optional
+            * if passed, the POP will be called with this configuration
+              file;
+            * if no ``settingsFile`` is passed, and config file ending
+              with the same name as the lens file post-fixed with
+              "_pyzdde_POP.CFG" is present, the settings from this file
+              will be used;
+            * if no ``settingsFile`` and no file name post-fixed with
+              "_pyzdde_POP.CFG" is found, but a config file with the same
+              name as the lens file is present, the settings from that
+              file will be used;
+            * if no settings file is found, then a default settings will
+              be used
+        displayData : bool
+            if ``true`` the function returns the 2D display data; default
+            is ``false``
+        txtFile : string, optional
+            if passed, the POP data file will be named such. Pass a
+            specific ``txtFile`` if you want to dump the file into a
+            separate directory.
+        keepFile : bool, optional
+            if ``False`` (default), the POP text file will be deleted
+            after use.
+            If ``True``, the file will persist. If ``keepFile`` is ``True``
+            but a ``txtFile`` is not passed, the POP text file will be
+            saved in the same directory as the lens (provided the required
+            folder access permissions are available)
+        timeout : integer, optional
+            timeout in seconds
+
+        Returns
+        -------
+        popData : tuple
+            popData is a 1-tuple containing just ``popInfo`` (see below)
+            if ``displayData`` is ``False`` (default).
+            If ``displayData`` is ``True``, ``popData`` is a 2-tuple
+            containing ``popInfo`` (a tuple) and ``powerGrid`` (a 2D list):
+
+            popInfo : named tuple
+                surf : integer
+                    surface number at which the POP is analysis was done
+                peakIrr/ cenPhase : float
+                    the peak irradiance is the maximum power per unit area
+                    at any point in the beam, measured in source units per
+                    lens unit squared. It returns center phase if the data
+                    type is "Phase" in POP settings
+                totPow : float
+                    the total power, or the integral of the irradiance
+                    over the entire beam if data type is "Irradiance" in
+                    POP settings. This field is blank for "Phase" data
+                fibEffSys : float
+                    the efficiency of power transfer through the system
+                fibEffRec : float
+                    the efficiency of the receiving fiber
+                coupling : float
+                    the total coupling efficiency, the product of the
+                    system and receiver efficiencies
+                pilotSize : float
+                    the size of the gaussian beam at the surface
+                pilotWaist : float
+                    the waist of the gaussian beam
+                pos : float
+                    relative z position of the gaussian beam
+                rayleigh : float
+                    the rayleigh range of the gaussian beam
+                gridX : integer
+                    the X-sampling
+                gridY : interger
+                    the Y-sampling
+                widthX : float
+                    width along X in lens units
+                widthY : float
+                    width along Y in lens units
+
+            powerGrid : 2D list/ None
+                a two-dimensional list of the powers in the analysis grid
+                if ``displayData`` is ``true``
+
+        Notes
+        -----
+        The function returns ``None`` for any field which was not
+        found in POP text file. This is most common in the case of
+        ``fiberEfficiency_system`` and ``fiberEfficiency_receiver``
+        as they need to be set explicitly in the POP settings
+
+        See Also
+        --------
+        zSetPOPSettings(), zModifyPOPSettings()
+        """
+        settings = _txtAndSettingsToUse(self, txtFile, settingsFile, 'Pop')
+        textFileName, cfgFile, getTextFlag = settings
+        ret = self.zGetTextFile(textFileName, 'Pop', cfgFile, getTextFlag,
+                                timeout)
+        assert ret == 0
+        # get line list
+        line_list = _readLinesFromFile(_openFile(textFileName))
+
+        # Get data type ... phase or Irradiance?
+        find_irr_data = _getFirstLineOfInterest(line_list, 'POP Irradiance Data',
+                                                patAtStart=False)
+        data_is_irr = False if find_irr_data is None else True
+        # Get the Surface number and Grid size
+        grid_line_num = _getFirstLineOfInterest(line_list, 'Grid size')
+        surf_line = line_list[grid_line_num - 1]
+        surf = int(_re.findall(r'\d{1,4}', surf_line)[0]) # assume: first int num in the line 
+                                 # is surf number. surf comment can have int or float nums 
+        grid_line = line_list[grid_line_num]
+        grid_x, grid_y = [int(i) for i in _re.findall(r'\d{2,5}', grid_line)]
+
+        # Point spacing
+        pts_line = line_list[_getFirstLineOfInterest(line_list, 'Point spacing')]
+        pat = r'-?\d\.\d{4,6}[Ee][-\+]\d{2,3}'
+        pts_x, pts_y =  [float(i) for i in _re.findall(pat, pts_line)]
+
+        width_x = pts_x*grid_x
+        width_y = pts_y*grid_y
+        
+        if data_is_irr:
+            # Peak Irradiance and Total Power
+            pat_i = r'-?\d\.\d{4,6}[Ee][-\+]\d{2,3}' # pattern for P. Irr, T. Pow,
+            peakIrr, totPow = None, None
+            pi_tp_line = _getFirstLineOfInterest(line_list, 'Peak Irradiance') 
+            if pi_tp_line: # Transfer magnitude doesn't have Peak Irradiance info
+                pi_tp_line = line_list[pi_tp_line]
+                pi_info, tp_info = pi_tp_line.split(',')
+                pi = _re.search(pat_i, pi_info)
+                tp = _re.search(pat_i, tp_info)
+                if pi:
+                    peakIrr = float(pi.group())
+                if tp:
+                    totPow = float(tp.group())
+        else:
+            # Center Phase
+            pat_p = r'-?\d+\.\d{4,6}' # pattern for Center Phase Info
+            centerPhase = None
+            #cp_line = line_list[_getFirstLineOfInterest(line_list, 'Center Phase')]
+            cp_line = _getFirstLineOfInterest(line_list, 'Center Phase')
+            if cp_line: # Transfer magnitude / Phase doesn't have Center Phase info
+                cp_line = line_list[cp_line]
+                cp = _re.search(pat_p, cp_line)
+                if cp:
+                    centerPhase = float(cp.group())
+        # Pilot_size, Pilot_Waist, Pos, Rayleigh [... available for
+        # both Phase and Irr data]
+        pat_fe = r'\d\.\d{6}'   # pattern for fiber efficiency
+        pat_pi = r'-?\d\.\d{4,6}[Ee][-\+]\d{2,3}' # pattern for Pilot size/waist
+        pilotSize, pilotWaist, pos, rayleigh = None, None, None, None
+
+        pilot_line = line_list[_getFirstLineOfInterest(line_list, 'X Pilot')]
+        p_size_info, p_waist_info, p_pos_info, p_rayleigh_info = pilot_line.split(',')
+        p_size = _re.search(pat_pi, p_size_info)
+        p_waist = _re.search(pat_pi, p_waist_info)
+        p_pos = _re.search(pat_pi, p_pos_info)
+        p_rayleigh = _re.search(pat_pi, p_rayleigh_info)
+        if p_size:
+            pilotSize_x = float(p_size.group())
+        if p_waist:
+            pilotWaist_x = float(p_waist.group())
+        if p_pos:
+            pos_x = float(p_pos.group())
+        if p_rayleigh:
+            rayleigh_x = float(p_rayleigh.group())
+
+        pilot_line = line_list[_getFirstLineOfInterest(line_list, 'Y Pilot')]
+        p_size_info, p_waist_info, p_pos_info, p_rayleigh_info = pilot_line.split(',')
+        p_size = _re.search(pat_pi, p_size_info)
+        p_waist = _re.search(pat_pi, p_waist_info)
+        p_pos = _re.search(pat_pi, p_pos_info)
+        p_rayleigh = _re.search(pat_pi, p_rayleigh_info)
+        if p_size:
+            pilotSize_y = float(p_size.group())
+        if p_waist:
+            pilotWaist_y = float(p_waist.group())
+        if p_pos:
+            pos_y = float(p_pos.group())
+        if p_rayleigh:
+            rayleigh_y = float(p_rayleigh.group())
+
+        # Fiber Efficiency, Coupling [... if enabled in settings]
+        fibEffSys, fibEffRec, coupling = None, None, None
+        effi_coup_line_num = _getFirstLineOfInterest(line_list, 'Fiber Efficiency')
+        if effi_coup_line_num:
+            efficiency_coupling_line = line_list[effi_coup_line_num]
+            efs_info, fer_info, cou_info = efficiency_coupling_line.split(',')
+            fes = _re.search(pat_fe, efs_info)
+            fer = _re.search(pat_fe, fer_info)
+            cou = _re.search(pat_fe, cou_info)
+            if fes:
+                fibEffSys = float(fes.group())
+            if fer:
+                fibEffRec = float(fer.group())
+            if cou:
+                coupling = float(cou.group())
+
+        if displayData:
+            # Get the 2D data
+            pat = (r'(-?\d\.\d{4,6}[Ee][-\+]\d{2,3}\s*)' + r'{{{num}}}'
+                   .format(num=grid_x))
+            start_line = _getFirstLineOfInterest(line_list, pat)
+            powerGrid = _get2DList(line_list, start_line, grid_y)
+
+        if not keepFile:
+            _deleteFile(textFileName)
+
+        if data_is_irr: # Irradiance data
+            popi = _co.namedtuple('POPinfo', ['surf', 'peakIrr', 'totPow',
+                                              'fibEffSys', 'fibEffRec', 'coupling',
+                                              'pilotSizeX', 'pilotWaistX', 'posX', 'rayleighX', 
+                                              'pilotSizeY', 'pilotWaistY', 'posY', 'rayleighY', 
+                                              'gridX', 'gridY',
+                                              'widthX', 'widthY' ])
+            popInfo = popi(surf, peakIrr, totPow, fibEffSys, fibEffRec, coupling,
+                           pilotSize_x, pilotWaist_x, pos_x, rayleigh_x,
+                           pilotSize_y, pilotWaist_y, pos_y, rayleigh_y,
+                           grid_x, grid_y, width_x, width_y)
+        else: # Phase data
+            popi = _co.namedtuple('POPinfo', ['surf', 'cenPhase', 'blank',
+                                              'fibEffSys', 'fibEffRec', 'coupling',
+                                              'pilotSize', 'pilotWaist', 'pos',
+                                              'rayleigh', 'gridX', 'gridY',
+                                              'widthX', 'widthY' ])
+            popInfo = popi(surf, centerPhase, None, fibEffSys, fibEffRec, coupling,
+                           pilotSize, pilotWaist, pos, rayleigh,
+                           grid_x, grid_y, width_x, width_y)
+        if displayData:
+            return (popInfo, powerGrid)
+        else:
+            return popInfo
+
     def zModifyPOPSettings(self, settingsFile, startSurf=None,
                            endSurf=None, field=None, wave=None, auto=None,
                            beamType=None, paramN=((),()), pIrr=None, tPow=None,
